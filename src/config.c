@@ -1,3 +1,9 @@
+/* 
+ * Pixras default config file
+ * Copyright (c) 2026 Mattias Burman <mmburman@hotmail.com>
+ * Licensed under the MIT License. See LICENSE-MIT for details.
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include "config.h"

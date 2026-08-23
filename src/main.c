@@ -1,3 +1,9 @@
+/*
+ * Pixras - A minimal pixel art editor configurable in c.
+ * Copywrite (c) 2026 Mattias Burman <mmburman@hotmail.com>
+ * Licensed under GPL3 Lincense. See LICENSE for details.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 
