@@ -9,15 +9,22 @@
 #include "config.h"
 #include "stb_ds.h"
 
-#define KEY_UNDO       KEY_Q
-#define KEY_REDO       KEY_W
+#define KEY_UNDO         KEY_Q
+#define KEY_REDO         KEY_W
 
-#define KEY_EXPORT     KEY_S
-#define KEY_LINE       KEY_D
-#define KEY_RECT       KEY_F
-#define KEY_FILL       KEY_A
+#define KEY_EXPORT       KEY_S
+#define KEY_LINE         KEY_D
+#define KEY_RECT         KEY_F
+#define KEY_FILL         KEY_A
 
-#define KEY_COLORSELECT KEY_LEFT_CONTROL
+#define KEY_NEXT_FRAME   KEY_X
+#define KEY_PREV_FRAME   KEY_Z
+#define KEY_UP_LAYER     KEY_E
+#define KEY_DOWN_LAYER   KEY_R
+
+#define KEY_VIEW_LAYERS  KEY_C
+
+#define KEY_COLORSELECT  KEY_LEFT_CONTROL
 
 // #define CLICKTOSELECTCOLOR
 
@@ -34,6 +41,7 @@ static ivec2 line_orig   = (ivec2){-1,-1};
 static ivec2 rect_orig   = (ivec2){-1,-1};
 static Image palate_im;
 static ivec2 previous_mouse_pos;
+static ivec2 edit_pos = (ivec2){0, 0};
 
 typedef struct {
   ivec2 key;
@@ -69,12 +77,24 @@ void init() {
 
 void graphics(pix_state state) {
   ClearBackground(BLACK);
-  draw_image_background(state, LIGHTGRAY, DARKGRAY);
-  pixras_draw_edit_image(state);
-  pixras_draw_preview(state);
+
   if (IsKeyDown(KEY_COLORSELECT)) {
     draw_color_selector(palate_im);
+    return;
   }
+
+  if (IsKeyDown(KEY_VIEW_LAYERS)) {
+    draw_image_background(state, LIGHTGRAY, DARKGRAY);
+    for (int i = 0; i < pixras_tilemap_size(state).y; i++) {
+      pixras_draw_part(state, (ivec2){edit_pos.x, i});
+    }
+    pixras_draw_preview(state);
+    return;
+  }
+  
+  draw_image_background(state, LIGHTGRAY, DARKGRAY);
+  pixras_draw_part(state, edit_pos);
+  pixras_draw_preview(state);
 }
 
 /*
@@ -103,6 +123,17 @@ void process(pix_state* state) {
     return;
   }
 
+  ivec2 t_size = pixras_tilemap_size(*state);
+
+  if (IsKeyPressed(KEY_NEXT_FRAME) && edit_pos.x < t_size.x - 1)
+    edit_pos.x++;
+  if (IsKeyPressed(KEY_PREV_FRAME) && edit_pos.x > 0)
+    edit_pos.x--;
+  if (IsKeyPressed(KEY_UP_LAYER) && edit_pos.y < t_size.y - 1)
+    edit_pos.y++;
+  if (IsKeyPressed(KEY_DOWN_LAYER) && edit_pos.y > 0)
+    edit_pos.y--;
+  
   if (IsKeyReleased(KEY_COLORSELECT)) {
     get_color_selected(&current_col, palate_im, mouse_pos);
   }  
@@ -115,16 +146,9 @@ void process(pix_state* state) {
   if (IsKeyPressed(KEY_UNDO)) pixras_undo(state);
   if (IsKeyPressed(KEY_REDO)) pixras_redo(state);
   
-  if (IsKeyPressed(KEY_EXPORT)) export_image(*state);
+  if (IsKeyPressed(KEY_EXPORT)) export_tilemap(*state, NULL);
 
-  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
-      IsKeyPressed(KEY_LINE) ||
-      IsKeyPressed(KEY_RECT) ||
-      IsKeyPressed(KEY_FILL)) {
-    copy_image(state);
-  }
-
-  Image im = current_image(*state);
+  Image im = pixras_get_image(*state, edit_pos);
   
   if (is_inside_image(*state, im_pos)) {
     if (IsKeyPressed(KEY_FILL)) {
@@ -179,6 +203,13 @@ void process(pix_state* state) {
       }
     }    
   }
+
+  if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) ||
+      IsKeyReleased(KEY_LINE) ||
+      IsKeyReleased(KEY_RECT) ||
+      IsKeyReleased(KEY_FILL)) {
+    pixras_add_to_history(state, edit_pos);
+  }
   
   previous_mouse_pos = mouse_pos;
 }
@@ -205,8 +236,78 @@ bool command(pix_state* state, char* cmd) {
     case 2: col2 = color; break;
     case 3: col3 = color; break;
     case 4: col4 = color; break;
-    default : printf("slot does not exist\n");
+    default : printf("slot %d does not exist \n", color_slot);
     }
+    return false;
+  }
+
+  int layer;
+  if (sscanf(cmd, "add-layer %d", &layer) == 1) {
+    add_blank_row(state, layer);
+    return false;
+  }
+
+  if (sscanf(cmd, "rm-layer %d", &layer) == 1 || sscanf(cmd, "remove-layer %d", &layer) == 1)  {
+    if (layer < state->num_layers) {
+      if (edit_pos.y == state->num_layers - 1)
+	edit_pos.y--;
+      remove_row(state, layer);
+      
+    }
+    return false;
+  }
+
+  int frame;
+  if (sscanf(cmd, "add-frame %d", &frame) == 1) {
+    add_blank_col(state, frame);
+    return false;
+  }
+  
+  if (sscanf(cmd, "add-frame-copy %d", &frame) == 1) {
+    add_copied_col(state, frame);
+    return false;
+  }
+
+  if (sscanf(cmd, "rm-frame %d", &frame) == 1 || sscanf(cmd, "remove-frame %d", &frame) == 1)  {
+    if (edit_pos.x == state->num_frames - 1)
+	edit_pos.x--;
+    if (frame < state->num_frames) 
+      remove_col(state, frame);
+    return false;
+  }
+
+  char filename[256] = {0};
+  if (sscanf(cmd, "export-frames %s", filename) == 1) {
+    export_frames(*state, filename);
+    return false;
+  }
+
+  if (sscanf(cmd, "export-frame %s", filename) == 1) {
+    export_frame(*state, filename, edit_pos.x);
+    return false;
+  }
+
+  if (sscanf(cmd, "export-part %s", filename) == 1) {
+    export_part(*state, filename, edit_pos);
+    return false;
+  }
+
+  if (strcmp(cmd, "info") == 0) {
+    printf("Resolution: %dx%d\n",
+	   state->image_width,
+	   state->image_height);
+    printf("Number of layers: %d\n", state->num_layers);
+    printf("Number of frames: %d\n", state->num_frames);
+
+    printf("Current layer: %d\n", edit_pos.y);
+    printf("Current frame: %d\n", edit_pos.x);
+
+    printf("Filename: %s\n", state->filename);
+    return false;
+  }
+
+  if (strcmp(cmd, "help") == 0) {
+    printf("Look at src/config.c for details\n");
     return false;
   }
   
@@ -214,7 +315,7 @@ bool command(pix_state* state, char* cmd) {
     system(cmd + 1);
     return false;
   }
-  
+
   printf("Failed to parse or run command: %s\n", cmd);
   return false;
 }
@@ -222,4 +323,3 @@ bool command(pix_state* state, char* cmd) {
 void uninitialize() {
   UnloadImage(palate_im);
 }
-

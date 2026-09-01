@@ -1,7 +1,7 @@
 /*
  * Pixras - A minimal pixel art editor configurable in c.
- * Copywrite (c) 2026 Mattias Burman <mmburman@hotmail.com>
- * Licensed under GPL3 Lincense. See LICENSE for details.
+ * Copyright (c) 2026 Mattias Burman <mmburman@hotmail.com>
+ * Licensed under GPL3 License. See LICENSE for details.
  */
 
 #include <stdio.h>
@@ -16,10 +16,25 @@
 #include "stb_ds.h"
 #include "pixras.h"
 
+#if (RAYLIB_VERSION_MAJOR < 6 || (RAYLIB_VERSION_MAJOR == 6 && RAYLIB_VERSION_MINOR < 1))
+void ImageDrawImage(Image *dst, Image src, int posX, int posY, Color tint) {
+  Rectangle srcRec = {0, 0, (float)src.width, (float)src.height};
+  Rectangle dstRec = {(float)posX, (float)posY, (float)src.width, (float)src.height};
+  ImageDraw(dst, src, srcRec, dstRec, tint);
+}
 
+/* void ImageDrawImageRec(Image *dst, Image src, */
+/* 		       Rectangle srcRec, */
+/* 		       Vector2 position, */
+/* 		       Color tint) { */
+/*   Rectangle dstRec = {position.x, position.y, src.width, src.height}; */
+/*   ImageDraw(dst, src, srcRec, dstRec, tint); */
+/* } */
+#endif
 
-int block_size(pix_state state) {
-  return state.image_width*state.image_height*sizeof(Color);
+size_t block_size(pix_state state) {
+  return (state.image_width*state.image_height)*sizeof(Color) + \
+         sizeof(history_header);
 }
 
 void assert_image_size(pix_state state) {
@@ -33,39 +48,113 @@ void init_empty_image(pix_state* state, cmd_opts opts){
   assert_image_size(*state);
   state->image_width  = opts.width;
   state->image_height = opts.height;
+  state->image_parts[0] = malloc(sizeof(Color)*opts.width*opts.height);
+  state->num_layers = 1;
+  state->num_frames = 1;
+  memset(state->image_parts[0], 0, sizeof(Color)*opts.width*opts.height);
 }
 
-void init_loaded_image(pix_state* state, char* filename) {
+void init_loaded_image(pix_state* state, char* filename, int expected_width, int expected_height) {
+  // if no width or height is expected they should be 0
   Image im = LoadImage(filename);
-  state->image_width  = im.width;
-  state->image_height = im.height;
+  
+  state->num_layers = 1;
+  state->num_frames = 1;
+  
+  if (expected_width > 0 && expected_height > 0) {
+    if (im.width % expected_width || im.height % expected_height) {
+      printf("The image width or height is not divisible by the expected image width or height\n");
+      exit(1);
+    }
+    state->num_layers = (int)(im.height / expected_height);
+    state->num_frames = (int)(im.width /  expected_width);
+  } else {
+    expected_width = im.width;
+    expected_height = im.height;
+  }
+
+  state->image_width  = expected_width;
+  state->image_height = expected_height;
+  
   // lets just hope they dont do anything stupid and load bad format
-  assert_image_size(*state);
-  memcpy(state->history_buf, im.data, block_size(*state));
+  assert_image_size(*state); // FIXME
+
+  for (int frame = 0; frame < state->num_frames; frame++) {
+    for (int layer = 0; layer < state->num_layers; layer++) {
+      int index = frame + MAX_NUM_LAYERS * layer;
+      state->image_parts[index] = malloc(sizeof(Color)*expected_width*expected_height);
+      Image im_part = pixras_get_image(*state, (ivec2){frame, layer});
+      for (int x = 0; x < expected_width; x++) {
+	for (int y = 0; y < expected_height; y++) {
+	  Color col = GetImageColor(im,
+				    x + frame * expected_width,
+				    y + layer * expected_height);
+	  ImageDrawPixel(&im_part, x, y, col);
+	}
+      }
+      if (frame == 0 && layer == 0) {
+	state->current_gen = -1; // oops
+	pixras_add_to_history(state, (ivec2){frame, layer});
+      } else {
+	pixras_add_to_history_compound(state, (ivec2){frame, layer});
+      }
+    }
+  }
   UnloadImage(im);
+}
+
+void init_image(pix_state* state, cmd_opts opts) {
+  if (opts.load) {
+    init_loaded_image(state, opts.filename, opts.width, opts.height);
+  } else {
+    init_empty_image(state, opts);
+  }
+  state->preview = GenImageColor(state->image_width, state->image_height, BLANK);
+}
+
+void free_image(pix_state state) {
+  free(state.history_buf);
+  UnloadImage(state.preview);
 }
 
 Color* current_block(pix_state state) {
   const int b_size    = block_size(state);
   const int used_size = floor(HISTORYALLOC / b_size / sizeof(Color)) * b_size;
-  return state.history_buf + (((state.current_gen * state.image_width * state.image_height)
-			       % (used_size)));
+  return (Color*)(((void*)state.history_buf) + ((state.current_gen * b_size) % used_size));
 }
 
-Image current_image(pix_state state) {
-  Color* blockid = current_block(state);
-  return (Image){blockid, state.image_width, state.image_height, 1,
+Image pixras_get_image(pix_state state, ivec2 pos) {
+  int index = pos.x + MAX_NUM_LAYERS * pos.y;
+  Color* buf = state.image_parts[index];
+  return (Image){buf, state.image_width, state.image_height, 1,
 		 PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
 }
 
+void pixras_add_to_history(pix_state* state, ivec2 pos) {
+  Image im = pixras_get_image(*state, pos);
+  state->current_gen++; // should add layer here because min_gen or something
+  state->max_gen=state->current_gen;
 
-void copy_image(pix_state* state) {
-  Color* old_blockid = current_block(*state);
-  state->current_gen += 1;
-  state->max_gen = state->current_gen;
-  Color* blockid = current_block(*state);
+  history_header header = {1, pos};
   
-  memcpy(blockid, old_blockid, block_size(*state));
+  Color* blockid    = current_block(*state);
+  Color* image_data = (Color*)(((void*)blockid) + sizeof(header));
+  
+  *(history_header*)blockid = header; 
+  memcpy(image_data, im.data, block_size(*state) - sizeof(header)); 
+}
+
+void pixras_add_to_history_compound(pix_state* state, ivec2 pos) {
+  Image im = pixras_get_image(*state, pos);
+  state->current_gen += 1; // should add layer here because min_gen or something
+
+  history_header header = {0, pos};
+  
+  Color* blockid    = current_block(*state);
+  Color* image_data = (Color*)(((void*)blockid) + sizeof(header));
+  
+  *(history_header*)&blockid = header;
+  memcpy(image_data, im.data, block_size(*state) - sizeof(header)); 
 }
 
 void parse_size(cmd_opts* opts, char* str) {
@@ -114,34 +203,21 @@ cmd_opts parse_args(int argc, char** argv) {
     exit(1);
   }
 
-  if ((opts.width > 0 || opts.height > 0) ^ create) {
+  if ((opts.width == 0 || opts.height == 0) && create) {
     errno = EIO;
-    perror("-c should be present if and only if -s is present and given correct size");
+    perror("-c presens => -s is present and given correct size");
     exit(1);
   }
 
-  if (opts.width == 0 || opts.height == 0) {
-    opts.load = true;
-  }
+  opts.load = !create;
   
   return opts;
 }
 
-void init_image(pix_state* state, cmd_opts opts) {
-  if (opts.load) {
-    init_loaded_image(state, opts.filename);
-  } else {
-    init_empty_image(state, opts);
-  }
-  state->preview = GenImageColor(state->image_width, state->image_height, BLANK);
-}
 
-void free_image(pix_state state) {
-  free(state.history_buf);
-  UnloadImage(state.preview);
-}
 
 void internal_draw_image(Image im, float scale, int cam_x, int cam_y) {
+  // maybe doesnt need to be internal only
   for (int x = 0; x < im.width; x++) {
     for (int y = 0; y < im.height; y++) {
       DrawRectangle(floor(x * scale) + cam_x,
@@ -157,12 +233,16 @@ void pixras_draw_image(pix_state state, Image im) {
   internal_draw_image(im, state.camera_scale, state.camera_pos.x, state.camera_pos.y);
 }
 
-void pixras_draw_edit_image(pix_state state) {
-  pixras_draw_image(state, current_image(state));
+void pixras_draw_part(pix_state state, ivec2 pos) {
+  pixras_draw_image(state, pixras_get_image(state, pos));
 }
 
 void pixras_draw_preview(pix_state state) {
   pixras_draw_image(state, state.preview);
+}
+
+ivec2 pixras_tilemap_size(pix_state state) {
+  return (ivec2){state.num_frames, state.num_layers};
 }
 
 ivec2 get_image_pos(pix_state state, ivec2 pos) { // check bounds
@@ -223,14 +303,12 @@ pix_state init_state() {
 		     ,0
 		     ,0
 		     ,0
+		     ,0
+		     ,0
 		     ,NULL
 		     ,preview
+		     ,{0} // hopefully works
 		     ,history_buf};
-}
-
-void export_image(pix_state state) {
-  Image im = current_image(state);
-  ExportImage(im, state.filename);
 }
 
 
@@ -249,15 +327,27 @@ void draw_image_background(pix_state state, Color col1, Color col2) {
   }
 }
 
+bool apply_history(pix_state* state) { // returns true if compound
+  Color* block = current_block(*state);
+  history_header header = *(history_header*)block;
+  Color* image_data = (Color*)(((void*)block) + sizeof(header));
+  memcpy(state->image_parts[header.changed_image.x + MAX_NUM_LAYERS * header.changed_image.y],
+	 image_data,
+	 sizeof(Color)*state->image_width*state->image_height);
+  return !header.is_beginning;
+}
+
 void pixras_undo(pix_state* state) {
-  if (state->current_gen > 0) {
+  while (state->current_gen > state->min_gen) {
     state->current_gen--;
+    if (!apply_history(state)) break;
   }
 }
 
 void pixras_redo(pix_state* state) {
   if (state->current_gen < state->max_gen) {
     state->current_gen++;
+    apply_history(state);    
   }
 }
 
@@ -419,3 +509,217 @@ void fill_region(Image* im, ivec2 pos, Color col, float threshold) {
   hmfree(will_be_active);
 }
 #pragma GCC diagnostic pop
+
+
+void export_tilemap(pix_state state, char* filename) {
+  ivec2 tilemap_size = pixras_tilemap_size(state);
+  Image im = GenImageColor(state.image_width  * tilemap_size.x,
+			   state.image_height * tilemap_size.y,
+			   BLANK);
+  
+  for (int x = 0; x < tilemap_size.x; x++) {
+    for (int y = 0; y < tilemap_size.y; y++) {
+      ImageDrawImage(&im, pixras_get_image(state, (ivec2){x, y}),
+		     state.image_width * x,
+		     state.image_height * y,
+		     WHITE);
+    }
+  }
+  if (filename == NULL) {
+    ExportImage(im, state.filename);
+  } else {
+    ExportImage(im, filename);
+  }
+  
+  UnloadImage(im);
+}
+
+
+void export_frames(pix_state state, char* filename) {
+  ivec2 tilemap_size = pixras_tilemap_size(state);
+  Image im = GenImageColor(state.image_width  * tilemap_size.x,
+			   state.image_height,
+			   BLANK);
+  
+  for (int x = 0; x < tilemap_size.x; x++) {
+    for (int y = 0; y < tilemap_size.y; y++) {
+      ImageDrawImage(&im, pixras_get_image(state, (ivec2){x, y}),
+		     state.image_width * x,
+		     0,
+		     WHITE);
+    }
+  }
+  if (filename == NULL) { // is this cursed?
+    ExportImage(im, state.filename);
+  } else {
+    ExportImage(im, filename);
+  }
+  
+  UnloadImage(im);
+}
+
+
+void export_frame(pix_state state, char* filename, int x) {
+  ivec2 tilemap_size = pixras_tilemap_size(state);
+  Image im = GenImageColor(state.image_width,
+			   state.image_height,
+			   BLANK);
+
+  for (int y = 0; y < tilemap_size.y; y++) {
+    ImageDrawImage(&im, pixras_get_image(state, (ivec2){x, y}),
+		   0,
+		   0,
+		   WHITE);
+  }
+  if (filename == NULL) { // is this cursed?
+    ExportImage(im, state.filename);
+  } else {
+    ExportImage(im, filename);
+  }
+  
+  UnloadImage(im);
+}
+
+
+void export_part(pix_state state, char* filename, ivec2 pos) {
+  Image im = pixras_get_image(state, pos);
+  
+  if (filename == NULL) { // is this cursed?
+    ExportImage(im, state.filename);
+  } else {
+    ExportImage(im, filename);
+  }
+}
+
+void swap_cols(pix_state* state, int col1, int col2) {
+  for (int y = 0; y < pixras_tilemap_size(*state).y; y++) {
+    int index1 = col1 + MAX_NUM_LAYERS * y;
+    int index2 = col2 + MAX_NUM_LAYERS * y;
+    
+    Color* tmp = state->image_parts[index2];
+    state->image_parts[index2] = state->image_parts[index1];
+    state->image_parts[index1] = tmp;
+
+    if (y == 0) {
+      pixras_add_to_history(state, (ivec2){col1, y});
+    } else {
+      pixras_add_to_history_compound(state, (ivec2){col1, y});
+    }
+    pixras_add_to_history_compound(state, (ivec2){col2, y});
+  } 
+}
+
+void swap_rows(pix_state* state, int row1, int row2) {
+  for (int x = 0; x < pixras_tilemap_size(*state).x; x++) {
+    int index1 = x + MAX_NUM_LAYERS * row1;
+    int index2 = x + MAX_NUM_LAYERS * row2;
+    
+    Color* tmp = state->image_parts[index2];
+    state->image_parts[index2] = state->image_parts[index1];
+    state->image_parts[index1] = tmp;
+
+    if (x == 0) {
+      pixras_add_to_history(state, (ivec2){x, row1});
+    } else {
+      pixras_add_to_history_compound(state, (ivec2){x, row1});
+    }
+    pixras_add_to_history_compound(state, (ivec2){x, row2});
+  } 
+}
+
+void add_blank_row(pix_state* state, int row) {
+  ivec2 tilemap_size = pixras_tilemap_size(*state);
+  state->num_layers++;
+  pixras_add_to_history(state, (ivec2){0,0}); // this is lowkey bad
+  for (int y = tilemap_size.y - 1; y >= row; y--) {
+    for (int x = 0; x < tilemap_size.x; x++) {
+      int index_src = x + MAX_NUM_LAYERS * y;
+      int index_dst = x + MAX_NUM_LAYERS * (y + 1);
+
+      state->image_parts[index_dst] = state->image_parts[index_src];
+      pixras_add_to_history_compound(state, (ivec2){x, y+1});
+    }
+  }
+  for (int x = 0; x < tilemap_size.x; x++) {
+    int index = x + MAX_NUM_LAYERS * row;
+    size_t image_size  = sizeof(Color) * state->image_width * state->image_height;
+    state->image_parts[index] = (Color*)malloc(image_size);
+    memset(state->image_parts[index], 0, image_size); // many mallocs put should be fine
+    pixras_add_to_history_compound(state, (ivec2){x, row});
+  }
+}
+
+void add_blank_col(pix_state* state, int col) {
+  ivec2 tilemap_size = pixras_tilemap_size(*state);
+  state->num_frames++;
+  pixras_add_to_history(state, (ivec2){0,0}); // this is lowkey bad
+  for (int x = tilemap_size.x - 1; x >= col; x--) {
+    for (int y = 0; y < tilemap_size.y; y++) {
+      int index_src = x +       MAX_NUM_LAYERS * y;
+      int index_dst = (x + 1) + MAX_NUM_LAYERS * y;
+
+      state->image_parts[index_dst] = state->image_parts[index_src];
+      pixras_add_to_history_compound(state, (ivec2){x+1, y});
+    }
+  }
+  for (int y = 0; y < tilemap_size.y; y++) {
+    int index = col + MAX_NUM_LAYERS * y;
+    size_t image_size  = sizeof(Color) * state->image_width * state->image_height;
+    state->image_parts[index] = (Color*)malloc(image_size);
+    memset(state->image_parts[index], 0, image_size); // many mallocs put should be fine
+    pixras_add_to_history_compound(state, (ivec2){col, y});
+  }
+}
+
+void add_copied_col(pix_state* state, int col) {
+  add_blank_col(state, col);
+  if (col > 0) {
+    for (int y = 0; y < state->num_layers; y++) {
+      int index_dst = col + MAX_NUM_LAYERS * y;
+      int index_src = col - 1 + MAX_NUM_LAYERS * y;
+      size_t image_size  = sizeof(Color) * state->image_width * state->image_height;
+      
+      memcpy(state->image_parts[index_dst],
+	     state->image_parts[index_src],
+	     image_size);
+      
+      pixras_add_to_history_compound(state, (ivec2){col, y});
+    }
+  }
+}
+
+void remove_row(pix_state* state, int row) {
+  ivec2 tilemap_size = pixras_tilemap_size(*state);
+  pixras_add_to_history(state, (ivec2){0,0});
+  for (int x = 0; x < tilemap_size.x; x++) {
+    int index = x + MAX_NUM_LAYERS * row;
+    free(state->image_parts[index]);
+    
+    for (int y = row + 1; y < tilemap_size.y; y++) {
+      int index_src = x + MAX_NUM_LAYERS * y;
+      int index_dst = x + MAX_NUM_LAYERS * (y - 1);
+
+      state->image_parts[index_dst] = state->image_parts[index_src];
+      pixras_add_to_history_compound(state, (ivec2){x, y - 1});
+    }
+  }
+  state->num_layers--;
+}
+
+void remove_col(pix_state* state, int col) {
+  ivec2 tilemap_size = pixras_tilemap_size(*state);
+  pixras_add_to_history(state, (ivec2){0,0});
+  for (int y = 0; y < tilemap_size.y; y++) {
+    int index = col + MAX_NUM_LAYERS * y;
+    free(state->image_parts[index]);
+    
+    for (int x = col + 1; x < tilemap_size.x; x++) {
+      int index_src = x + MAX_NUM_LAYERS * y;
+      int index_dst = (x - 1) + MAX_NUM_LAYERS * y;
+
+      state->image_parts[index_dst] = state->image_parts[index_src];
+      pixras_add_to_history_compound(state, (ivec2){x - 1, y});
+    }
+  }
+  state->num_frames--;
+}
